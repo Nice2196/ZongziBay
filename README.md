@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/image/zongzibay_logo.svg" alt="ZongziBay" width="96" height="91">
+</p>
+
 <h1 align="center">ZongziBay（粽子湾）</h1>
 
 <p align="center">

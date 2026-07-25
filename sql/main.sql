@@ -111,4 +111,19 @@ ON "notification" (
   "isRead" ASC
 );
 
+-- ----------------------------
+-- Table structure for api_token
+-- ----------------------------
+DROP TABLE IF EXISTS "api_token";
+CREATE TABLE "api_token" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "name" TEXT NOT NULL,
+  "token_hash" TEXT NOT NULL UNIQUE,
+  "scopes" TEXT NOT NULL DEFAULT 'read',
+  "is_active" INTEGER NOT NULL DEFAULT 1,
+  "last_used_at" DATETIME,
+  "created_at" DATETIME NOT NULL,
+  "expires_at" DATETIME
+);
+
 PRAGMA foreign_keys = true;

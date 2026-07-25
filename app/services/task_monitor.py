@@ -259,22 +259,46 @@ class TaskMonitor:
         logger.info("字幕任务 targetPath=%s -> base_dir=%s (将解析为本地路径)", task_target or "(空)", base_dir)
         if not source_base or not os.path.exists(source_base):
             logger.error(f"字幕任务 {task['id']} 源目录不存在: {source_base}")
+            db.update_task_status(task["id"], "error")
             db.insert_notification(
                 title="字幕任务失败",
-                content=f"源目录不存在: {source_base}",
+                content=f"字幕「{task.get('taskName', '') or task['id']}」源目录不存在: {source_base}",
                 type=NotificationType.ERROR.value,
             )
             return
+        ok_count = 0
+        fail_count = 0
         for ft in file_tasks:
+            ft_status = (ft.get("file_status") or "").strip()
+            if ft_status == "failed":
+                fail_count += 1
+                continue
+            if ft_status == "completed":
+                ok_count += 1
+                continue
             src_name = (ft.get("sourcePath") or "").replace("\\", "/").strip()
             dest_name = (ft.get("file_rename") or "").strip() or src_name
             ft_target = (ft.get("targetPath") or "").replace("\\", "/").strip()
             if not src_name:
+                logger.warning(f"字幕任务 {task['id']} 文件任务 {ft.get('id')} 无源文件（下载未完成）")
+                db.update_file_task_status(ft["id"], "failed", "源文件缺失（下载未完成）")
+                db.insert_notification(
+                    title="字幕任务失败",
+                    content=f"字幕「{task.get('taskName', '')}」文件任务缺少源文件，下载可能未完成",
+                    type=NotificationType.ERROR.value,
+                )
+                fail_count += 1
                 continue
             src_full = os.path.normpath(os.path.join(source_base, src_name))
             if not os.path.exists(src_full):
                 logger.warning(f"字幕任务 {task['id']} 源文件不存在: {src_full}")
                 db.update_file_task_status(ft["id"], "failed", "源文件不存在")
+                db.insert_notification(
+                    title="字幕任务失败",
+                    content=f"字幕「{task.get('taskName', '')}」源文件不存在: {src_name}",
+                    type=NotificationType.ERROR.value,
+                )
+                fail_count += 1
                 continue
             dest_dir = os.path.join(base_dir, ft_target) if ft_target else base_dir
             dest_dir = dest_dir.replace("\\", "/")
@@ -290,6 +314,7 @@ class TaskMonitor:
                         logger.info(f"字幕源文件已清理: {src_full}")
                     except OSError as e:
                         logger.warning(f"字幕源文件清理失败 {src_full}: {e}")
+                    ok_count += 1
                     continue
                 shutil.copy2(src_full, dest_full)
                 db.update_file_task_status(ft["id"], "completed")
@@ -299,16 +324,38 @@ class TaskMonitor:
                     logger.info(f"字幕源文件已清理: {src_full}")
                 except OSError as e:
                     logger.warning(f"字幕源文件清理失败 {src_full}: {e}")
+                ok_count += 1
             except Exception as e:
                 logger.error(f"字幕任务 {task['id']} 复制失败: {e}")
                 db.update_file_task_status(ft["id"], "failed", str(e))
-                raise
-        db.update_task_status(task["id"], "completed")
-        db.insert_notification(
-            title="字幕任务完成",
-            content=f"字幕「{task.get('taskName', '')}」已移动至目标路径",
-            type=NotificationType.SUCCESS.value,
-        )
+                db.insert_notification(
+                    title="字幕任务失败",
+                    content=f"字幕「{task.get('taskName', '')}」移动失败: {e}",
+                    type=NotificationType.ERROR.value,
+                )
+                fail_count += 1
+        task_label = task.get("taskName", "") or f"#{task['id']}"
+        if ok_count == 0:
+            db.update_task_status(task["id"], "error")
+            db.insert_notification(
+                title="字幕任务失败",
+                content=f"字幕「{task_label}」全部文件处理失败",
+                type=NotificationType.ERROR.value,
+            )
+        elif fail_count:
+            db.update_task_status(task["id"], "completed")
+            db.insert_notification(
+                title="字幕任务部分完成",
+                content=f"字幕「{task_label}」成功 {ok_count} 个、失败 {fail_count} 个",
+                type=NotificationType.WARNING.value,
+            )
+        else:
+            db.update_task_status(task["id"], "completed")
+            db.insert_notification(
+                title="字幕任务完成",
+                content=f"字幕「{task_label}」已移动至目标路径",
+                type=NotificationType.SUCCESS.value,
+            )
 
     def _extract_torrent_hash(self, task_name: str, source_url: str) -> str | None:
         """从任务名或链接中提取种子 Hash，统一为 40 位小写 hex 以便与 qBittorrent API 一致"""

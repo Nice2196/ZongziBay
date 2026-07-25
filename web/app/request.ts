@@ -9,7 +9,9 @@ declare module 'axios' {
 }
 
 const client = Axios.create({
-  baseURL: import.meta.env.VITE_API_BASE || (import.meta.env.DEV ? 'http://127.0.0.1:8000' : ''),
+  // 开发环境走 Nuxt/Vite 同源代理（/api → 后端），生产由 FastAPI 同域托管前端
+  // 若需直连后端可设置 VITE_API_BASE（跨源时 Cookie 可能无法携带）
+  baseURL: import.meta.env.VITE_API_BASE || '',
   withCredentials: true,  // 发送 httpOnly Cookie 认证
 })
 
@@ -128,8 +130,35 @@ export default async function request<T = any>(url: string, options: AxiosReques
   const res: AxiosResponse<T> = await client.request({ url, ...options })
   const payload: any = res.data as any
   if (payload && typeof payload === 'object' && 'code' in payload && payload.code !== 200) {
-    // ===== 未登录 (40100)：清除当前实例状态并跳转登录页 =====
+    // 中间件用 HTTP 200 + code=40100 表示未登录；先尝试 refresh，再决定是否跳转
     if (payload.code === 40100) {
+      const reqUrl = options.url || url || ''
+      if (!reqUrl.includes('/users/refresh') && !reqUrl.includes('/users/login')) {
+        try {
+          const refreshRes = await Axios.post(
+            `${client.defaults.baseURL || ''}/api/v1/users/refresh`,
+            {},
+            { withCredentials: true }
+          )
+          if (refreshRes.data?.data?.access_token) {
+            const retry: AxiosResponse<T> = await client.request({ url, ...options })
+            const retryPayload: any = retry.data as any
+            if (retryPayload && typeof retryPayload === 'object' && 'code' in retryPayload && retryPayload.code !== 200) {
+              if (retryPayload.code === 40100) {
+                await clearAuthAndRedirect()
+                throw new Error(retryPayload.message || '请先登录')
+              }
+              if (options.skipErrorHandler) {
+                throw new Error(retryPayload.message || 'Request failed')
+              }
+              throw new Error(retryPayload.message || 'Request failed')
+            }
+            return retry.data
+          }
+        } catch {
+          // refresh 失败则继续走登出跳转
+        }
+      }
       await clearAuthAndRedirect()
       throw new Error(payload.message || '请先登录')
     }

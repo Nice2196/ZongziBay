@@ -491,21 +491,49 @@ class AssrtService:
         file_tasks.sort(key=lambda ft: ft["id"])
         if len(file_tasks) != len(items):
             logger.warning("字幕任务 %s file_tasks 数量与 items 不一致，按最小长度处理", task_id)
+        ok_count = 0
+        fail_count = 0
         for i, (file_index, _file_rename) in enumerate(items):
             if i >= len(file_tasks):
                 break
             try:
                 saved_path, filename = self._download_sub_to_path(detail, sub_id, file_index, download_dir=download_dir)
                 db.update_file_task_source_path(file_tasks[i]["id"], filename)
+                ok_count += 1
             except Exception as e:
+                fail_count += 1
+                err_msg = getattr(e, "message", None) or str(e)
                 logger.exception("字幕任务 %s 第 %s 个文件下载失败: %s", task_id, i, e)
-                db.update_file_task_status(file_tasks[i]["id"], "failed", str(e))
+                db.update_file_task_status(file_tasks[i]["id"], "failed", err_msg)
+                db.insert_notification(
+                    title="字幕下载失败",
+                    content=f"字幕「{task_name}」第 {i + 1} 个文件下载失败: {err_msg}",
+                    type=NotificationType.ERROR.value,
+                )
+        if ok_count == 0:
+            db.update_download_task_name_and_status(task_id, task_name, "error", task_info=task_name)
+            db.insert_notification(
+                title="字幕任务失败",
+                content=f"字幕「{task_name}」全部 {fail_count or len(items)} 个文件下载失败，任务已终止",
+                type=NotificationType.ERROR.value,
+            )
+            return
         db.update_download_task_name_and_status(task_id, task_name, "moving", task_info=task_name)
-        db.insert_notification(
-            title="字幕任务已添加",
-            content=f"字幕「{task_name}」共 {len(items)} 个文件已下载并加入队列，将由监控移动至目标路径",
-            type=NotificationType.SUCCESS.value,
-        )
+        if fail_count:
+            db.insert_notification(
+                title="字幕任务部分失败",
+                content=(
+                    f"字幕「{task_name}」成功 {ok_count} 个、失败 {fail_count} 个；"
+                    f"成功文件将继续移动至目标路径"
+                ),
+                type=NotificationType.WARNING.value,
+            )
+        else:
+            db.insert_notification(
+                title="字幕任务已添加",
+                content=f"字幕「{task_name}」共 {len(items)} 个文件已下载并加入队列，将由监控移动至目标路径",
+                type=NotificationType.SUCCESS.value,
+            )
 
     def create_subtitle_download_tasks_batch(
         self,

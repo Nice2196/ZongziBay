@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { Button } from '@/components/ui/button'
-import { ChevronLeft, Home, LogOut, Settings } from 'lucide-vue-next'
+import { LogOut, Settings } from 'lucide-vue-next'
 import NotificationBell from '@/components/NotificationBell.vue'
 
-const router = useRouter()
-const route = useRoute()
-const isHome = computed(() => route.path === '/')
 const { logout } = useAuth()
 const { showZongzibayChan, init: initChan } = useZongzibayChan()
 onMounted(() => { initChan() })
@@ -15,18 +12,17 @@ onMounted(() => { initChan() })
   <div class="relative flex flex-col min-h-screen bg-background text-foreground bg-grid">
     <header class="fixed top-0 left-0 right-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60">
       <div class="max-w-7xl mx-auto flex h-16 items-center px-4 sm:px-6 lg:px-8">
-        <div class="mr-4 flex gap-2" v-if="!isHome">
-          <Button variant="ghost" size="icon" @click="router.back()">
-            <ChevronLeft class="h-5 w-5" />
-            <span class="sr-only">Back</span>
-          </Button>
-          <Button variant="ghost" size="icon" as-child>
-            <NuxtLink to="/">
-              <Home class="h-5 w-5" />
-              <span class="sr-only">Home</span>
-            </NuxtLink>
-          </Button>
-        </div>
+        <NuxtLink
+          to="/"
+          class="inline-flex items-center rounded-md px-1.5 py-1 transition-colors hover:bg-muted/60"
+          aria-label="粽子湾首页"
+        >
+          <img
+            src="~/assets/img/zongzibay.svg"
+            alt="ZongziBay"
+            class="h-7 w-auto max-w-[9.5rem] object-contain"
+          />
+        </NuxtLink>
         <div class="flex-1" />
         <div class="flex items-center gap-2">
           <NotificationBell />

@@ -13,6 +13,7 @@ from app.api.v1.api import api_router
 from app.core import db
 from app.core.auth_middleware import JWTAuthMiddleware
 from app.core.handlers import register_exception_handlers
+from app.mcp.server import create_mcp_app
 from app.services.task_monitor import task_monitor
 
 # 修复 Windows 下 MIME 类型可能不正确的问题
@@ -33,7 +34,8 @@ def _file_response_with_nocache(filepath: str) -> Response:
     return resp
 mimetypes.add_type("text/css", ".css")
 
-# 配置日志格式
+# 配置日志格式。
+# 注意：import mcp 会给 root 安装 RichHandler（仅 %(message)s），必须用 force=True 覆盖。
 _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -42,6 +44,7 @@ logging.basicConfig(
     format=_LOG_FORMAT,
     datefmt=_LOG_DATE_FORMAT,
     handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
 
 # uvicorn 日志配置字典 — 统一格式，消除 uvicorn 默认的 INFO:     前缀
@@ -60,6 +63,10 @@ _UVICORN_LOG_CONFIG = {
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stdout",
         },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["default"],
     },
     "loggers": {
         "uvicorn": {"handlers": ["default"], "level": "WARNING", "propagate": False},
@@ -91,6 +98,7 @@ async def lifespan(app: FastAPI):
     # 启动：初始化数据库并启动任务监控
     logger.info(f"ZongziBay v{get_version()} 正在启动...")
     db.init_db()
+    db.ensure_api_token_table()
     task_monitor.start()
     logger.info("服务已就绪，监听 http://127.0.0.1:8000")
     yield
@@ -132,6 +140,16 @@ register_exception_handlers(app)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/v1")
+
+# 挂载 MCP Server（SSE 端点，供外部 AI 服务连接）
+# 连接地址: http://host:port/mcp/sse
+# 需要在请求头中携带 Authorization: Bearer zbi_xxxx
+try:
+    mcp_app = create_mcp_app()
+    app.mount("/mcp", mcp_app)
+    logger.info("MCP Server 已挂载到 /mcp")
+except Exception:
+    logger.warning("MCP Server 挂载失败（可能缺少 mcp 依赖），MCP 功能不可用", exc_info=True)
 
 # 静态文件服务配置
 # Nuxt 打包输出目录
