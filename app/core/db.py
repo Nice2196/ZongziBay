@@ -361,6 +361,110 @@ class Database:
         conn.commit()
         return cur.rowcount > 0
 
+    # ---- API Token 管理 ----
+
+    def ensure_api_token_table(self) -> None:
+        """确保 api_token 表存在（兼容旧版本升级）"""
+        conn = self.get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT 1 FROM api_token LIMIT 1")
+        except sqlite3.OperationalError:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS "api_token" (
+                  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+                  "name" TEXT NOT NULL,
+                  "token_hash" TEXT NOT NULL UNIQUE,
+                  "scopes" TEXT NOT NULL DEFAULT 'read',
+                  "is_active" INTEGER NOT NULL DEFAULT 1,
+                  "last_used_at" DATETIME,
+                  "created_at" DATETIME NOT NULL,
+                  "expires_at" DATETIME
+                )
+            """)
+            conn.commit()
+            logger.info("api_token 表已创建")
+
+    def create_api_token(
+        self,
+        name: str,
+        token_hash: str,
+        scopes: str = "read",
+        expires_at: Optional[str] = None,
+    ) -> int:
+        """创建 API Token"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO api_token (name, token_hash, scopes, is_active, created_at, expires_at) VALUES (?, ?, ?, 1, ?, ?)",
+            (name, token_hash, scopes, now, expires_at),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def get_api_tokens(self, page: int = 1, page_size: int = 20) -> Tuple[List[Dict[str, Any]], int]:
+        """分页获取 API Token 列表，不返回 token_hash"""
+        offset = (page - 1) * page_size
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM api_token")
+        total = cur.fetchone()[0]
+        cur.execute(
+            "SELECT id, name, scopes, is_active, last_used_at, created_at, expires_at FROM api_token ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows], total
+
+    def get_api_token_by_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        """根据 token_hash 查找有效的 API Token"""
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM api_token WHERE token_hash = ? AND is_active = 1",
+            (token_hash,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        # 检查是否过期
+        if data.get("expires_at"):
+            expires_at = data["expires_at"]
+            if isinstance(expires_at, str):
+                try:
+                    expires_dt = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+                    if expires_dt < datetime.now():
+                        return None
+                except ValueError:
+                    pass
+        return data
+
+    def update_api_token_last_used(self, token_id: int) -> None:
+        """更新 Token 最后使用时间"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE api_token SET last_used_at = ? WHERE id = ?", (now, token_id))
+        conn.commit()
+
+    def update_api_token_status(self, token_id: int, is_active: bool) -> bool:
+        """启用/禁用 API Token"""
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE api_token SET is_active = ? WHERE id = ?", (1 if is_active else 0, token_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def delete_api_token(self, token_id: int) -> bool:
+        """硬删除 API Token"""
+        conn = self.get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM api_token WHERE id = ?", (token_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
 
 db = Database()
 
@@ -383,3 +487,11 @@ mark_notification_read = db.mark_notification_read
 mark_all_notifications_read = db.mark_all_notifications_read
 get_unread_count = db.get_unread_count
 delete_notification = db.delete_notification
+
+ensure_api_token_table = db.ensure_api_token_table
+create_api_token = db.create_api_token
+get_api_tokens = db.get_api_tokens
+get_api_token_by_hash = db.get_api_token_by_hash
+update_api_token_last_used = db.update_api_token_last_used
+update_api_token_status = db.update_api_token_status
+delete_api_token = db.delete_api_token

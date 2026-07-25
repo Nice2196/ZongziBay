@@ -8,7 +8,9 @@ import { getTrendingMoviesApiV1TmdbTrendingMovieGet } from '@/api/tmdb'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import Checkbox from '@/components/ui/checkbox/Checkbox.vue'
-import { Palette, Info, Shield, Clapperboard, DownloadCloud, Server, HardDrive, Wand2, Link2, CheckCircle, XCircle, Loader, RefreshCw, ArrowUpCircle } from 'lucide-vue-next'
+import { Palette, Info, Shield, Clapperboard, DownloadCloud, Server, HardDrive, Wand2, Link2, CheckCircle, XCircle, Loader, RefreshCw, ArrowUpCircle, Key, Copy, Eye, EyeOff, ChevronDown, Ban, Play, Trash2 } from 'lucide-vue-next'
+import { getApiTokens, createApiToken, toggleApiToken, deleteApiToken } from '@/api/apiTokens'
+import { onClickOutside } from '@vueuse/core'
 import pkg from '../../package.json'
 import {
   Dialog,
@@ -38,6 +40,7 @@ type SettingsTab =
   | 'paths'
   | 'rename'
   | 'trackers'
+  | 'apitokens'
   | 'about'
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Palette }[] = [
@@ -49,6 +52,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Palette }[] 
   { id: 'paths', label: '路径', icon: HardDrive },
   { id: 'rename', label: '重命名', icon: Wand2 },
   { id: 'trackers', label: 'Tracker', icon: Link2 },
+  { id: 'apitokens', label: 'MCP', icon: Key },
   { id: 'about', label: '关于', icon: Info },
 ]
 
@@ -629,6 +633,180 @@ const setDefaultType = (v: DefaultType) => {
 }
 
 
+// --- API Token 管理 ---
+interface ApiTokenItem {
+  id: number
+  name: string
+  scopes: string
+  is_active: boolean
+  last_used_at: string | null
+  created_at: string
+  expires_at: string | null
+}
+
+const apiTokens = ref<ApiTokenItem[]>([])
+const apiTokensTotal = ref(0)
+const apiTokensLoading = ref(false)
+
+const newTokenName = ref('')
+const newTokenScopes = ref('read')
+const newTokenExpiryDays = ref<number | null>(null)
+const creating = ref(false)
+
+const isScopeMenuOpen = ref(false)
+const scopeMenuRef = ref<HTMLElement | null>(null)
+onClickOutside(scopeMenuRef, () => {
+  isScopeMenuOpen.value = false
+})
+
+const scopeOptions = [
+  { value: 'read', label: '只读', desc: '只读 — 查看下载列表、搜索媒体信息' },
+  { value: 'search', label: '搜索', desc: '搜索 — 只读 + 搜索种子和字幕' },
+  { value: 'download', label: '完整', desc: '完整 — 搜索 + 添加/取消下载任务' },
+] as const
+
+const scopeLabels: Record<string, string> = Object.fromEntries(
+  scopeOptions.map((o) => [o.value, o.desc]),
+)
+
+const selectedScopeLabel = computed(
+  () => scopeOptions.find((o) => o.value === newTokenScopes.value)?.label ?? newTokenScopes.value,
+)
+
+function selectScope(value: string) {
+  newTokenScopes.value = value
+  isScopeMenuOpen.value = false
+}
+
+// 新创建的 token（完整 token 仅展示一次）
+const createdToken = ref<{ id: number; name: string; token: string; scopes: string; expires_at: string | null; masked: string } | null>(null)
+const showFullToken = ref(false)
+const createdTokenDialogOpen = ref(false)
+
+function closeCreatedTokenDialog() {
+  createdTokenDialogOpen.value = false
+  createdToken.value = null
+  showFullToken.value = false
+}
+
+function onCreatedTokenDialogOpenChange(open: boolean) {
+  if (!open) closeCreatedTokenDialog()
+  else createdTokenDialogOpen.value = true
+}
+
+const deleteTokenDialogOpen = ref(false)
+const tokenToDelete = ref<{ id: number; name: string } | null>(null)
+const deletingToken = ref(false)
+
+async function loadApiTokens() {
+  apiTokensLoading.value = true
+  try {
+    const res = await getApiTokens({ page: 1, page_size: 100 })
+    const data = (res as any)?.data
+    apiTokens.value = data?.items ?? []
+    apiTokensTotal.value = data?.total ?? 0
+  } catch {
+    // 静默失败
+  } finally {
+    apiTokensLoading.value = false
+  }
+}
+
+async function handleCreateToken() {
+  if (!newTokenName.value.trim()) return
+  creating.value = true
+  try {
+    const res = await createApiToken({
+      name: newTokenName.value.trim(),
+      scopes: newTokenScopes.value,
+      expires_in_days: newTokenExpiryDays.value ?? null,
+    })
+    const data = (res as any)?.data
+    if (data) {
+      createdToken.value = data
+      showFullToken.value = true
+      createdTokenDialogOpen.value = true
+    }
+    newTokenName.value = ''
+    newTokenScopes.value = 'read'
+    newTokenExpiryDays.value = null
+    await loadApiTokens()
+  } catch (e: any) {
+    toast.error(e?.message || '创建失败')
+  } finally {
+    creating.value = false
+  }
+}
+
+async function handleToggleToken(tokenId: number, isActive: boolean) {
+  try {
+    await toggleApiToken(tokenId, isActive)
+    await loadApiTokens()
+    toast.success(isActive ? '已启用' : '已禁用')
+  } catch (e: any) {
+    toast.error(e?.message || '操作失败')
+  }
+}
+
+function openDeleteTokenDialog(tokenId: number, name: string) {
+  tokenToDelete.value = { id: tokenId, name }
+  deleteTokenDialogOpen.value = true
+}
+
+async function confirmDeleteToken() {
+  if (!tokenToDelete.value) return
+  deletingToken.value = true
+  try {
+    await deleteApiToken(tokenToDelete.value.id)
+    await loadApiTokens()
+    toast.success('令牌已删除')
+    deleteTokenDialogOpen.value = false
+    tokenToDelete.value = null
+  } catch (e: any) {
+    toast.error(e?.message || '删除失败')
+  } finally {
+    deletingToken.value = false
+  }
+}
+
+function copyTokenToClipboard(token: string) {
+  navigator.clipboard.writeText(token).then(() => {
+    toast.success('令牌已复制到剪贴板')
+  }).catch(() => {
+    toast.error('复制失败，请手动复制')
+  })
+}
+
+function copyMcpConfig(token: string) {
+  const host = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000'
+  const config = JSON.stringify({
+    mcpServers: {
+      zongzibay: {
+        url: `${host}/mcp/sse`,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    },
+  }, null, 2)
+  navigator.clipboard.writeText(config).then(() => {
+    toast.success('MCP 配置已复制到剪贴板')
+  }).catch(() => {
+    toast.error('复制失败')
+  })
+}
+
+const mcpSseUrl = computed(() => {
+  const host = typeof window !== 'undefined' ? window.location.origin : ''
+  return `${host}/mcp/sse`
+})
+
+const isApiTokenTab = computed(() => activeTab.value === 'apitokens')
+
+watch(activeTab, (tab) => {
+  if (tab === 'apitokens') loadApiTokens()
+})
+
 onMounted(async () => {
   if (typeof localStorage === 'undefined') return
   const t = localStorage.getItem(THEME_KEY) as Theme | null
@@ -793,7 +971,8 @@ onUnmounted(() => {
     </section>
 
     <!-- 系统配置（可编辑并保存到服务端 config 文件） -->
-    <form v-show="isConfigTab" @submit.prevent>
+    <!-- 用 div 而非 form：多组密码/密钥字段放进同一 form 会触发 Chrome 密码表单启发式警告 -->
+    <div v-if="isConfigTab">
     <section class="rounded-xl border border-border bg-card p-5 sm:p-7 space-y-5">
       <div class="space-y-6">
         <div v-show="activeTab === 'tmdb' || activeTab === 'qb' || activeTab === 'services'" class="space-y-3">
@@ -855,6 +1034,7 @@ onUnmounted(() => {
               <Label>用户名</Label>
               <input
                 v-model="securityUsername"
+                autocomplete="username"
                 class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
@@ -863,6 +1043,7 @@ onUnmounted(() => {
               <input
                 v-model="securityPassword"
                 type="password"
+                autocomplete="new-password"
                 :placeholder="securityPasswordConfigured ? PLACEHOLDER_CONFIGURED : '请输入登录密码'"
                 class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
@@ -971,6 +1152,7 @@ onUnmounted(() => {
               <Label>用户名</Label>
               <input
                 v-model="qbUsername"
+                autocomplete="off"
                 class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
@@ -979,6 +1161,7 @@ onUnmounted(() => {
               <input
                 v-model="qbPassword"
                 type="password"
+                autocomplete="off"
                 :placeholder="qbPasswordConfigured ? PLACEHOLDER_CONFIGURED : '请输入 WebUI 密码'"
                 class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
@@ -988,6 +1171,7 @@ onUnmounted(() => {
               <input
                 v-model="qbApiKey"
                 type="password"
+                autocomplete="off"
                 :placeholder="qbApiKeyConfigured ? PLACEHOLDER_CONFIGURED : 'qbt_xxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
                 class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
@@ -1353,12 +1537,180 @@ onUnmounted(() => {
         </div>
       </div>
     </section>
-    </form>
+    </div>
+
+    <!-- MCP 令牌管理 -->
+    <section v-show="activeTab === 'apitokens'" class="rounded-xl border border-border bg-card p-5 sm:p-7 space-y-5">
+      <div class="space-y-5">
+        <div>
+          <p class="text-xs text-muted-foreground">
+            MCP 令牌用于外部 AI 服务（如 Claude、Cursor 等）通过 MCP 协议访问 ZongziBay。
+            令牌仅在创建时展示一次，请妥善保管。连接地址：<code class="rounded bg-muted px-1 py-0.5 text-[11px]">{{ mcpSseUrl }}</code>
+          </p>
+        </div>
+
+        <!-- 创建令牌表单 -->
+        <div class="rounded-md border border-border p-4 space-y-3">
+          <div class="font-medium text-sm">创建新 MCP 令牌</div>
+          <div class="grid gap-3 sm:grid-cols-3">
+            <div class="space-y-1">
+              <Label class="text-xs">名称</Label>
+              <input
+                v-model="newTokenName"
+                placeholder="例如：MCP"
+                class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div class="space-y-1">
+              <Label class="text-xs">权限</Label>
+              <div class="relative" ref="scopeMenuRef">
+                <button
+                  type="button"
+                  class="flex h-[34px] w-full items-center justify-between rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="isScopeMenuOpen = !isScopeMenuOpen"
+                >
+                  <span>{{ selectedScopeLabel }}</span>
+                  <ChevronDown class="h-3.5 w-3.5 opacity-50" />
+                </button>
+                <div
+                  v-if="isScopeMenuOpen"
+                  class="absolute left-0 top-full mt-1 z-50 w-full min-w-[14rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95"
+                >
+                  <div class="p-1">
+                    <button
+                      v-for="opt in scopeOptions"
+                      :key="opt.value"
+                      type="button"
+                      class="relative flex w-full cursor-pointer select-none flex-col items-start rounded-sm px-2 py-1.5 text-left outline-none hover:bg-accent hover:text-accent-foreground"
+                      :class="{ 'bg-accent text-accent-foreground': newTokenScopes === opt.value }"
+                      @click="selectScope(opt.value)"
+                    >
+                      <span class="text-sm font-medium">{{ opt.label }}</span>
+                      <span class="text-[11px] text-muted-foreground">{{ opt.desc }}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <p class="text-[11px] text-muted-foreground">{{ scopeLabels[newTokenScopes] }}</p>
+            </div>
+            <div class="space-y-1">
+              <Label class="text-xs">过期天数（可选）</Label>
+              <input
+                v-model.number="newTokenExpiryDays"
+                type="number"
+                min="1"
+                max="3650"
+                placeholder="留空则永不过期"
+                class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+          </div>
+          <Button size="sm" :disabled="creating || !newTokenName.trim()" @click="handleCreateToken">
+            <Key v-if="!creating" class="mr-1 h-3.5 w-3.5" />
+            <Loader v-if="creating" class="mr-1 h-3.5 w-3.5 animate-spin" />
+            {{ creating ? '创建中…' : '创建 MCP 令牌' }}
+          </Button>
+        </div>
+
+        <!-- 令牌列表 -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="font-medium text-sm">MCP 令牌列表（{{ apiTokensTotal }}）</div>
+            <Button size="sm" variant="ghost" class="h-7 text-xs" :disabled="apiTokensLoading" @click="loadApiTokens">
+              <RefreshCw :class="['mr-1 h-3 w-3', apiTokensLoading ? 'animate-spin' : '']" />
+              刷新
+            </Button>
+          </div>
+          <div v-if="apiTokensLoading && !apiTokens.length" class="text-center py-8 text-sm text-muted-foreground">
+            <Loader class="mx-auto h-5 w-5 animate-spin mb-2" />加载中…
+          </div>
+          <div v-else-if="!apiTokens.length" class="text-center py-8 text-sm text-muted-foreground">
+            暂无令牌，请在上方创建第一个 MCP 令牌
+          </div>
+          <div v-else class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-border text-left text-xs text-muted-foreground">
+                  <th class="py-2 pr-3 font-medium">名称</th>
+                  <th class="py-2 pr-3 font-medium">权限</th>
+                  <th class="py-2 pr-3 font-medium">状态</th>
+                  <th class="py-2 pr-3 font-medium hidden sm:table-cell">创建时间</th>
+                  <th class="py-2 pr-3 font-medium hidden sm:table-cell">最后使用</th>
+                  <th class="py-2 pr-3 font-medium">过期</th>
+                  <th class="py-2 font-medium text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in apiTokens" :key="t.id" class="border-b border-border/50" :class="{ 'opacity-50': !t.is_active }">
+                  <td class="py-2.5 pr-3 font-medium">{{ t.name }}</td>
+                  <td class="py-2.5 pr-3">
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
+                      :class="{
+                        'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400': t.scopes === 'read',
+                        'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400': t.scopes === 'search',
+                        'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400': t.scopes === 'download',
+                      }"
+                    >{{ { read: '只读', search: '搜索', download: '完整' }[t.scopes] || t.scopes }}</span>
+                  </td>
+                  <td class="py-2.5 pr-3">
+                    <span class="inline-flex items-center gap-1">
+                      <span class="h-2 w-2 rounded-full" :class="t.is_active ? 'bg-green-500' : 'bg-gray-400'" />
+                      {{ t.is_active ? '启用' : '禁用' }}
+                    </span>
+                  </td>
+                  <td class="py-2.5 pr-3 text-xs text-muted-foreground hidden sm:table-cell">{{ t.created_at }}</td>
+                  <td class="py-2.5 pr-3 text-xs text-muted-foreground hidden sm:table-cell">{{ t.last_used_at || '从未使用' }}</td>
+                  <td class="py-2.5 pr-3 text-xs">
+                    <span v-if="t.expires_at" :class="new Date(t.expires_at) < new Date() ? 'text-red-500' : 'text-muted-foreground'">
+                      {{ t.expires_at }}
+                    </span>
+                    <span v-else class="text-muted-foreground">永不过期</span>
+                  </td>
+                  <td class="py-2.5 text-right">
+                    <div class="flex items-center justify-end gap-0.5">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        class="h-8 w-8 p-0 text-muted-foreground hover:text-foreground hover:bg-muted"
+                        :title="t.is_active ? '禁用' : '启用'"
+                        @click="handleToggleToken(t.id, !t.is_active)"
+                      >
+                        <Ban v-if="t.is_active" class="h-3.5 w-3.5" />
+                        <Play v-else class="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        class="h-8 w-8 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                        title="删除"
+                        @click="openDeleteTokenDialog(t.id, t.name)"
+                      >
+                        <Trash2 class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- 关于 -->
     <section v-show="activeTab === 'about'" class="rounded-xl border border-border bg-card p-5 sm:p-7 space-y-5">
       <div class="space-y-3 text-sm text-muted-foreground">
-        <p>粽子湾资源助手 — 聚合磁链搜索、qBittorrent 推送与智能重命名。</p>
+        <p class="flex items-center gap-2.5 text-foreground">
+          <img
+            src="~/assets/img/zongzibay_logo.svg"
+            alt="ZongziBay"
+            class="h-7 w-7 shrink-0 object-contain"
+          />
+          <span>
+            <span class="font-medium">粽子湾资源助手</span>
+            <span class="text-muted-foreground"> — 聚合磁链搜索、qBittorrent 推送与智能重命名。</span>
+          </span>
+        </p>
         <div class="flex items-center gap-3 flex-wrap">
           <span>
             当前版本：
@@ -1422,6 +1774,93 @@ onUnmounted(() => {
         <Button :disabled="applyingDefaults.tmdb || applyingDefaults.assrt" @click="confirmApplyDefaultKeys">
           {{ (defaultKeyTarget === 'tmdb' ? applyingDefaults.tmdb : applyingDefaults.assrt) ? '应用中…' : '确认使用' }}
         </Button>
+      </div>
+    </DialogContent>
+  </Dialog>
+
+  <!-- 删除 MCP 令牌确认 -->
+  <Dialog v-model:open="deleteTokenDialogOpen">
+    <DialogContent class="max-w-sm overflow-x-hidden w-[calc(100vw-1rem)] sm:w-full">
+      <DialogHeader>
+        <DialogTitle>删除 MCP 令牌</DialogTitle>
+        <DialogDescription>
+          确定要删除令牌「{{ tokenToDelete?.name }}」吗？使用该令牌的服务将立即失效，此操作无法撤销。
+        </DialogDescription>
+      </DialogHeader>
+      <div class="flex justify-end gap-3 mt-4">
+        <Button variant="outline" :disabled="deletingToken" @click="deleteTokenDialogOpen = false">取消</Button>
+        <Button variant="destructive" :disabled="deletingToken" @click="confirmDeleteToken">
+          <Loader v-if="deletingToken" class="mr-1 h-3.5 w-3.5 animate-spin" />
+          {{ deletingToken ? '删除中…' : '确认删除' }}
+        </Button>
+      </div>
+    </DialogContent>
+  </Dialog>
+
+  <!-- MCP 令牌创建成功（仅展示一次） -->
+  <Dialog
+    :open="createdTokenDialogOpen"
+    @update:open="onCreatedTokenDialogOpenChange"
+  >
+    <DialogContent class="max-w-md w-[calc(100vw-1rem)] sm:w-full gap-5">
+      <DialogHeader class="space-y-3 text-left sm:text-left">
+        <div class="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-500/10">
+          <CheckCircle class="h-5 w-5 text-emerald-500" />
+        </div>
+        <div class="space-y-1.5">
+          <DialogTitle>MCP 令牌已创建</DialogTitle>
+          <DialogDescription>
+            此令牌只会显示一次，关闭后无法再次查看，请先复制保存。
+          </DialogDescription>
+        </div>
+      </DialogHeader>
+
+      <div v-if="createdToken" class="space-y-4">
+        <div class="flex flex-wrap gap-2 text-xs">
+          <span class="rounded-md border border-border bg-muted/50 px-2.5 py-1 text-foreground">
+            {{ createdToken.name }}
+          </span>
+          <span class="rounded-md border border-border bg-muted/50 px-2.5 py-1 text-muted-foreground">
+            {{ { read: '只读', search: '搜索', download: '完整' }[createdToken.scopes] || createdToken.scopes }}
+          </span>
+          <span class="rounded-md border border-border bg-muted/50 px-2.5 py-1 text-muted-foreground">
+            {{ createdToken.expires_at ? `过期 ${createdToken.expires_at}` : '永不过期' }}
+          </span>
+        </div>
+
+        <div class="space-y-2">
+          <div class="text-xs font-medium text-muted-foreground">令牌</div>
+          <div class="rounded-lg border border-border bg-muted/40 p-3">
+            <code class="block break-all font-mono text-xs leading-relaxed select-all text-foreground">
+              {{ showFullToken ? createdToken.token : createdToken.masked }}
+            </code>
+          </div>
+          <div class="flex gap-2">
+            <Button size="sm" variant="outline" class="flex-1" @click="showFullToken = !showFullToken">
+              <Eye v-if="!showFullToken" class="h-3.5 w-3.5" />
+              <EyeOff v-else class="h-3.5 w-3.5" />
+              {{ showFullToken ? '隐藏' : '显示' }}
+            </Button>
+            <Button size="sm" class="flex-1" @click="copyTokenToClipboard(createdToken.token)">
+              <Copy class="h-3.5 w-3.5" />
+              复制令牌
+            </Button>
+          </div>
+        </div>
+
+        <div class="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2.5">
+          <p class="text-[11px] leading-relaxed text-muted-foreground mb-2">
+            也可一键复制 Cursor / Claude 可用的 MCP 配置。
+          </p>
+          <Button size="sm" variant="secondary" class="w-full" @click="copyMcpConfig(createdToken.token)">
+            <Copy class="h-3.5 w-3.5" />
+            复制 MCP 配置
+          </Button>
+        </div>
+      </div>
+
+      <div class="flex justify-end border-t border-border pt-4">
+        <Button class="min-w-24" @click="closeCreatedTokenDialog">我已保存</Button>
       </div>
     </DialogContent>
   </Dialog>

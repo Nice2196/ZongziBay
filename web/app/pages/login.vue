@@ -45,13 +45,13 @@ const handleLogin = async () => {
     )
 
     if (res.data?.access_token) {
-      setToken(res.data.access_token)
+      // Token 已写入 httpOnly Cookie；localStorage 只存登录标记
+      setToken('authenticated')
       toast.success('登录成功')
       await navigateTo('/')
     }
   } catch (e: any) {
     toast.error(e.message || '登录失败，请检查用户名和密码')
-    toast.error(msg)
   } finally {
     loading.value = false
   }

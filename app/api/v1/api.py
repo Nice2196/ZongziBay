@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import anime, assrt, bangumi, health, magnet, notifications, piratebay, system, tasks, tmdb, users
+from app.api.v1 import anime, assrt, bangumi, health, magnet, notifications, piratebay, system, tasks, tmdb, users, api_tokens
 
 # 聚合所有 v1 子路由
 api_router = APIRouter()
@@ -15,3 +15,4 @@ api_router.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 api_router.include_router(tmdb.router, prefix="/tmdb", tags=["TMDB"])
 api_router.include_router(assrt.router, prefix="/subtitle", tags=["Subtitle"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
+api_router.include_router(api_tokens.router, prefix="/api-tokens", tags=["API Tokens"])

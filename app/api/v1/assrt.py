@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
 
+from app.core.db import db
 from app.schemas.assrt import (
     AssrtDownloadBatchRequest,
     AssrtDownloadBatchResponse,
@@ -15,6 +16,7 @@ from app.schemas.assrt import (
     AssrtSubDetail,
 )
 from app.schemas.base import BaseResponse
+from app.schemas.notification import NotificationType
 from app.services.assrt_service import assrt_service
 
 router = APIRouter()
@@ -104,6 +106,18 @@ def _run_fill_downloads_in_background(task_id: int, sub_id: int, item_tuples: li
         assrt_service.fill_subtitle_downloads_and_start_moving(task_id, sub_id, item_tuples)
     except Exception as e:
         logger.exception("字幕后台下载/回填失败 task_id=%s sub_id=%s: %s", task_id, sub_id, e)
+        err_msg = getattr(e, "message", None) or str(e)
+        try:
+            db.update_download_task_name_and_status(
+                task_id, f"字幕 {sub_id}", "error", task_info=f"ASSRT字幕 #{sub_id}"
+            )
+            db.insert_notification(
+                title="字幕下载失败",
+                content=f"字幕任务 #{task_id}（字幕 {sub_id}）后台下载失败: {err_msg}",
+                type=NotificationType.ERROR.value,
+            )
+        except Exception:
+            logger.exception("写入字幕下载失败通知时出错 task_id=%s", task_id)
 
 
 @router.post("/sub/download/batch", response_model=BaseResponse[AssrtDownloadBatchResponse], summary="批量字幕下载并加入任务队列")

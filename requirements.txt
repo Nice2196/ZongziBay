@@ -6,6 +6,7 @@ python-multipart
 python-jose[cryptography]
 bcrypt>=4.0,<5
 tmdbv3api
+mcp>=1.0,<2
 
 # 测试（FastAPI TestClient 依赖 httpx；固定版本避免 CI 与本地行为不一致）
 httpx

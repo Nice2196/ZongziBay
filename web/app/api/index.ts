@@ -11,6 +11,7 @@ import * as system from "./system";
 import * as tasks from "./tasks";
 import * as tmdb from "./tmdb";
 import * as users from "./users";
+import * as apiTokens from "./apiTokens";
 import * as serveRootGet from "./serveRootGet";
 import * as serveSpaPathGet from "./serveSpaPathGet";
 export default {
@@ -23,6 +24,7 @@ export default {
   tasks,
   tmdb,
   users,
+  apiTokens,
   serveRootGet,
   serveSpaPathGet,
 };

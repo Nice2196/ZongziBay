@@ -2,11 +2,12 @@ import base64
 import hashlib
 import hmac
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 import bcrypt
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
@@ -15,6 +16,10 @@ from app.schemas.auth import TokenData
 from app.schemas.base import BusinessException, ErrorCode
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login", auto_error=False)
+
+# 与 users.py / auth_middleware.py 保持一致
+_COOKIE_SUFFIX = os.getenv("ZONGZI_COOKIE_SUFFIX", "")
+_ACCESS_TOKEN_COOKIE = f"access_token{'_' + _COOKIE_SUFFIX if _COOKIE_SUFFIX else ''}"
 
 # bcrypt 轮次数
 _BCRYPT_ROUNDS = 12
@@ -161,8 +166,13 @@ def decode_refresh_token(token: str) -> Optional[dict]:
         return None
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenData:
-    """解析 Token 并返回当前用户，用于保护需认证的接口"""
+async def get_current_user(
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
+) -> TokenData:
+    """解析 Token 并返回当前用户。优先 Authorization Bearer，其次 httpOnly Cookie。"""
+    if not token:
+        token = request.cookies.get(_ACCESS_TOKEN_COOKIE)
     if not token:
         raise BusinessException(code=ErrorCode.NOT_LOGIN_ERROR, message="未提供凭证")
     try:
