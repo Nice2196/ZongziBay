@@ -8,7 +8,8 @@ from typing import List
 
 from app.core import db
 from app.core.config import config
-from app.core.qb_client import QBittorrentClient
+from app.core.downloader.manager import downloader_manager
+from app.core.downloader.base import BaseDownloader
 from app.schemas.base import BusinessException, ErrorCode
 from app.schemas.magnet import MagnetFile
 from app.schemas.notification import NotificationType
@@ -30,21 +31,17 @@ def normalize_info_hash(raw_hash: str) -> str:
 
 
 class MagnetService:
-    """磁链解析与 qBittorrent 下载服务"""
+    """磁链解析与下载服务（后端由 downloader_manager 决定）"""
 
     def __init__(self):
         self.client = None
         self.reload_config()
 
     def reload_config(self) -> None:
-        """从当前运行时配置刷新 qBittorrent 连接信息与 trackers（设置页保存后可立即生效）。"""
-        qb_config = config.get("qbittorrent", {}) or {}
-        self.host = qb_config.get("host", "http://localhost:8080")
-        self.username = qb_config.get("username", "admin")
-        self.password = qb_config.get("password", "adminadmin")
-        self.api_key = qb_config.get("api_key", "") or ""
+        """从当前运行时配置刷新下载器后端与 trackers（设置页保存后可立即生效）。"""
         self.trackers = config.get("trackers", []) or []
-        # 连接参数变更后重建 client/session，避免沿用旧 host 的 session
+        # 连接参数变更后重建后端实例，避免沿用旧 host 的 session
+        downloader_manager.reload()
         self.client = None
 
     def _append_trackers(self, magnet_link: str) -> str:
@@ -57,74 +54,48 @@ class MagnetService:
                 result += f"&tr={urllib.parse.quote(tr, safe='')}"
         return result
 
-    def _get_client(self):
-        if not self.client:
-            self.client = QBittorrentClient(
-                host=self.host, username=self.username,
-                password=self.password, api_key=self.api_key)
-        return self.client
+    def _get_client(self) -> BaseDownloader:
+        return downloader_manager.get_backend()
 
     def check_connection(self) -> bool:
         try:
             client = self._get_client()
             version = client.get_version()
-            logger.info(f"连接 qBittorrent 成功, 版本: {version}")
+            logger.info(f"连接下载器 {client.capabilities.name} 成功, 版本: {version}")
             return True
         except Exception as e:
-            logger.error(f"连接 qBittorrent 失败: {e}")
+            logger.error(f"连接下载器失败: {e}")
             return False
 
     def parse_magnet(self, magnet_link: str, timeout: int = 60):
-        """解析磁链获取文件列表（暂停状态添加，只取元数据不下载）"""
+        """解析磁链获取文件列表（不实际下载数据）
+
+        委托给当前下载器后端的统一接口 parse_magnet：
+        - qB / Transmission：暂停添加拉元数据
+        - Aria2：bt-metadata-only 只拉元数据
+        """
         client = self._get_client()
 
-        match = re.search(r'xt=urn:btih:([a-zA-Z0-9]+)', magnet_link)
-        if not match:
-            raise BusinessException(code=ErrorCode.PARAMS_ERROR, message="无效的磁力链接")
-        torrent_hash = normalize_info_hash(match.group(1))
-
         # 若种子已存在，直接读取文件列表
-        try:
-            existing = client.get_torrent_info(torrent_hash)
-            if existing:
-                return self.get_files_from_torrent(client, torrent_hash)
-        except Exception as e:
-            logger.warning(f"检查种子存在性出错: {e}")
-
-        # 追加 trackers，暂停状态添加（只获取元数据）
-        magnet_with_trackers = self._append_trackers(magnet_link)
-        try:
-            success = client.add_torrent(urls=magnet_with_trackers, is_paused=True)
-            if not success:
-                raise BusinessException(code=ErrorCode.OPERATION_ERROR, message="添加种子失败")
-        except Exception as e:
-            logger.error(f"添加种子失败: {e}")
-            raise BusinessException(code=ErrorCode.OPERATION_ERROR, message=f"添加种子失败: {e}")
-
-        # 轮询等待元数据
-        start_time = time.time()
-        fetched = False
-        result = []
-        try:
-            while time.time() - start_time < timeout:
-                try:
-                    info = client.get_torrent_info(torrent_hash)
-                    if info and info.get('total_size', 0) > 0:
-                        result = self.get_files_from_torrent(client, torrent_hash)
-                        fetched = True
-                        break
-                except Exception as e:
-                    logger.warning(f"轮询元数据出错: {e}")
-                time.sleep(2)
-        finally:
+        torrent_hash = normalize_info_hash(self._extract_hash(magnet_link) or "")
+        if torrent_hash:
             try:
-                client.delete_torrents(hashes=torrent_hash, delete_files=True)
+                existing = client.get_torrent_info(torrent_hash)
+                if existing:
+                    return [MagnetFile(name=f.get("name", ""), path=f.get("path", ""), size=f.get("size", 0))
+                            for f in client.get_torrent_files(torrent_hash)]
             except Exception as e:
-                logger.error(f"删除临时种子失败 {torrent_hash}: {e}")
+                logger.warning(f"检查种子存在性出错: {e}")
 
-        if fetched:
-            return result
-        raise BusinessException(code=ErrorCode.OPERATION_ERROR, message="等待元数据超时")
+        # 追加 trackers 后委托后端解析
+        magnet_with_trackers = self._append_trackers(magnet_link)
+        files = client.parse_magnet(magnet_with_trackers, timeout=timeout)
+        return [MagnetFile(name=f.name, path=f.path, size=f.size) for f in files]
+
+    @staticmethod
+    def _extract_hash(magnet_link: str) -> str:
+        match = re.search(r'xt=urn:btih:([a-zA-Z0-9]+)', magnet_link or "")
+        return match.group(1) if match else ""
 
     def add_magnet_download(self, magnet_link: str, save_path: str = None) -> dict:
         """添加磁链下载任务到 qBittorrent"""

@@ -143,7 +143,7 @@ class TaskMonitor:
                         try:
                             from app.services.task_service import task_service
                             file_tasks = db.get_file_tasks(task['id'])
-                            success = task_service.push_to_qb(
+                            success = task_service.push_to_downloader(
                                 task_id=task['id'],
                                 source_url=task.get('sourceUrl', ''),
                                 source_path=task.get('sourcePath', ''),
@@ -380,7 +380,7 @@ class TaskMonitor:
             return (path or "").strip()
 
     def _map_status(self, qb_state: str) -> str:
-        """将 qBittorrent 状态映射为系统状态"""
+        """将下载器状态映射为系统状态"""
         # uploading/stalledUP 等 = 已做种/完成
         # 注意：checkingUP 状态可能表示正在校验，此时不应直接视为已完成
         if qb_state in ['uploading', 'stalledUP', 'queuedUP', 'forcedUP', 'pausedUP']:
@@ -393,6 +393,12 @@ class TaskMonitor:
             return 'error'
         elif qb_state in ['checkingUP', 'checkingDL', 'checkingResumeData']:
             return 'checking'
+        elif qb_state in ['removed']:
+            # 下载器已删除该任务（Aria2 removed）
+            return 'cancelled'
+        elif qb_state in ['paused', 'pausedDL']:
+            # 暂停下载中（Transmission / Aria2）
+            return 'paused'
         else:
             return 'downloading'  # downloading, stalledDL, metaDL 等
 
@@ -435,12 +441,27 @@ class TaskMonitor:
             logger.warning(f"获取种子文件列表失败，按带目录处理: {e}")
             return True
 
+    @staticmethod
+    def _supports(client, capability: str) -> bool:
+        """能力感知：后端 capabilities 标记（Aria2 不支持重命名/移动时降级为复制归档）。
+
+        兼容旧客户端与测试 mock（无 capabilities 属性时默认支持全部能力）。
+        """
+        caps = getattr(client, "capabilities", None)
+        if caps is None:
+            return True
+        return bool(getattr(caps, capability, True))
+
     def _handle_completed_task(self, client, task: dict, torrent_hash: str, torrent_info: dict) -> str | None:
         """处理已完成任务：先重命名，再移动或复制。返回建议的最终状态(如 'completed')，返回 None 则保持原定状态"""
         file_tasks = []
         try:
             file_tasks = db.get_file_tasks(task['id'])
-            self._process_file_renames(client, task['id'], torrent_hash, file_tasks)
+            # 仅当后端支持种子内重命名时才执行（Aria2 不支持 → 跳过，复制时按 file_rename 改名）
+            if self._supports(client, "supports_rename"):
+                self._process_file_renames(client, task['id'], torrent_hash, file_tasks)
+            else:
+                logger.info(f"后端 {getattr(client, 'capabilities', None) and getattr(client.capabilities, 'name', '')} 不支持种子内重命名，跳过重命名步骤")
         except Exception as e:
             logger.error(f"处理文件重命名任务失败: {e}")
 
@@ -476,9 +497,11 @@ class TaskMonitor:
                         break
             
             use_copy = config.get("qbittorrent.file_handling.use_copy", False)
+            # 后端不支持 set_location（如 Aria2）→ 强制本程序复制归档
+            supports_location = self._supports(client, "supports_set_location")
             # 仅当所有文件在根目录（不带目录）时 qB 移动才只移文件；带目录则用复制以便只拷文件到目标
             has_any_folder = self._has_any_folder(client, torrent_hash)
-            use_qb_move = (use_copy and not has_any_folder) or (not use_copy)
+            use_qb_move = supports_location and ((use_copy and not has_any_folder) or (not use_copy))
             if use_qb_move:
                 logger.info(f"任务 {task['id']} 使用 qB 移动 (use_copy={use_copy}, 仅根目录文件={not has_any_folder})")
                 is_moved, local_path, qb_path = self._maybe_move_location(client, task['id'], torrent_hash, torrent_info, final_target_path)
@@ -837,22 +860,27 @@ class TaskMonitor:
             
             match_found = False
             if qb_files:
-                # 1. 精确匹配
+                # 1. 精确匹配（兼容 name=完整路径 或 path=完整路径）
                 for f in qb_files:
-                    f_name = f.get('name', '')
-                    if normalize(f_name) == norm_old:
+                    f_path = normalize(f.get('path', '') or f.get('name', ''))
+                    if f_path == norm_old:
+                        real_old_path = f_path
+                        match_found = True
+                        break
+                    f_name = normalize(f.get('name', ''))
+                    if f_name == norm_old:
                         real_old_path = f_name
                         match_found = True
                         break
-                
+
                 # 2. 模糊匹配：处理 NoSubfolder 导致的根目录剥离
                 if not match_found:
                     for f in qb_files:
-                        f_name = f.get('name', '')
-                        norm_f = normalize(f_name)
+                        f_path = normalize(f.get('path', '') or f.get('name', ''))
+                        norm_f = normalize(f.get('name', '')) or f_path
                         if norm_old.endswith('/' + norm_f) or norm_f.endswith('/' + norm_old):
-                            logger.info(f"纠正重命名的源文件路径: {old_path} -> {f_name}")
-                            real_old_path = f_name
+                            logger.info(f"纠正重命名的源文件路径: {old_path} -> {f_path}")
+                            real_old_path = f_path
                             match_found = True
                             break
 
