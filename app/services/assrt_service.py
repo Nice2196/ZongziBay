@@ -191,6 +191,25 @@ def _normalize_sub_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# ASSRT 文件服务器：国内网络下 HTTP(80) 会在握手阶段被 RST，
+# 同一主机改用 HTTPS(443) 却能通（但仍有较大概率被重置，需要重试）。
+_SUBTITLE_DOWNLOAD_RETRY = 25
+
+
+def _subtitle_url_candidates(url: str) -> List[str]:
+    """生成字幕下载的候选 URL：强制 https，并重复多次以便重试。
+
+    ASSRT API 返回的下载链接形如 http://file1.assrt.net/...，
+    直接请求会 ConnectionResetError；改成 https 后可正常下载。
+    """
+    if not url:
+        return []
+    u = url.strip()
+    if u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    return [u] * _SUBTITLE_DOWNLOAD_RETRY
+
+
 def _has_sub_id(raw: Any) -> bool:
     """判断一条字幕记录是否带有可用 ID（兼容旧版 fileid 字段）。"""
     if not isinstance(raw, dict):
@@ -382,20 +401,33 @@ class AssrtService:
         safe = re.sub(r"[^\w\-. ]", "_", filename).strip() or f"sub_{sub_id}"
         filename = safe[:200] if len(safe) > 200 else safe
         saved_path = os.path.join(download_dir, filename)
-        try:
-            r = requests.get(file_url, timeout=30, stream=True)
-            r.raise_for_status()
-            with open(saved_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        except requests.RequestException as e:
-            logger.warning("字幕 HTTP 下载失败 %s: %s", file_url, e)
-            raise BusinessException(code=ErrorCode.SYSTEM_ERROR.code, message=f"下载失败: {e}")
-        except OSError as e:
-            logger.warning("字幕写入失败 %s: %s", saved_path, e)
-            raise BusinessException(code=ErrorCode.SYSTEM_ERROR.code, message=f"保存失败: {e}")
-        return os.path.abspath(saved_path), filename
+        urls = _subtitle_url_candidates(file_url)
+        last_err: Optional[Exception] = None
+        for attempt, url in enumerate(urls, 1):
+            try:
+                r = requests.get(url, timeout=30, stream=True)
+                r.raise_for_status()
+                with open(saved_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                if attempt > 1:
+                    logger.info("字幕下载第 %d 次尝试成功: %s", attempt, url)
+                return os.path.abspath(saved_path), filename
+            except requests.RequestException as e:
+                last_err = e
+                # 半途失败可能留下不完整文件，删掉再来
+                if os.path.exists(saved_path):
+                    try:
+                        os.remove(saved_path)
+                    except OSError:
+                        pass
+                continue
+            except OSError as e:
+                logger.warning("字幕写入失败 %s: %s", saved_path, e)
+                raise BusinessException(code=ErrorCode.SYSTEM_ERROR.code, message=f"保存失败: {e}")
+        logger.warning("字幕下载失败（已尝试 %d 次，https） %s: %s", len(urls), file_url, last_err)
+        raise BusinessException(code=ErrorCode.SYSTEM_ERROR.code, message=f"下载失败: {last_err}")
 
     def _create_subtitle_download_task_with_detail(
         self,
